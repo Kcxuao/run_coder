@@ -9,11 +9,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  PNPM_VERSION: 8
 
 jobs:
-  # 前端构建
+  # Vue 3 前端构建 (pnpm)
   build-web:
-    name: Build Web
+    name: Build Vue 3 Web
     runs-on: ubuntu-latest
     
     steps:
@@ -23,26 +24,55 @@ jobs:
         uses: actions/setup-node@v3
         with:
           node-version: '18'
-          cache: 'npm'
-          cache-dependency-path: web/package-lock.json
+      
+      - name: Install pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 8
+          run_install: false
+      
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+      
+      - name: Setup pnpm cache
+        uses: actions/cache@v3
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
       
       - name: Install dependencies
         working-directory: ./web
-        run: npm ci
+        run: pnpm install --frozen-lockfile
       
-      - name: Build web
+      - name: Lint
         working-directory: ./web
-        run: npm run build
+        run: pnpm run lint || true
       
-      - name: Upload web artifacts
+      - name: Type check
+        working-directory: ./web
+        run: pnpm run type-check || true
+      
+      - name: Build
+        working-directory: ./web
+        run: pnpm run build
+        env:
+          NODE_ENV: production
+      
+      - name: Upload web dist
         uses: actions/upload-artifact@v3
         with:
           name: web-dist
-          path: web/dist  # 或 web/build，根据你的构建输出目录
+          path: web/dist
+          retention-days: 1
 
-  # 后端测试
+  # Rust 后端测试
   test-server:
-    name: Test Server
+    name: Test Rust Server
     runs-on: ubuntu-latest
     
     steps:
@@ -51,22 +81,27 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
+          components: rustfmt, clippy
       
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
       
-      - name: Run tests
+      - name: Check formatting
         working-directory: ./server
-        run: cargo test --all-features --verbose
+        run: cargo fmt --check
       
       - name: Run clippy
         working-directory: ./server
         run: cargo clippy --all-features -- -D warnings
+      
+      - name: Run tests
+        working-directory: ./server
+        run: cargo test --all-features --verbose
 
   # 后端多平台构建
   build-server:
-    name: Build Server
+    name: Build Server - ${{ matrix.asset_name }}
     needs: [build-web, test-server]
     strategy:
       fail-fast: false
@@ -86,6 +121,13 @@ jobs:
             asset_name: code-runner-linux-arm64
             use_cross: true
           
+          # Linux ARMv7
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            artifact_name: code-runner
+            asset_name: code-runner-linux-armv7
+            use_cross: true
+          
           # Windows x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -100,7 +142,7 @@ jobs:
             asset_name: code-runner-macos-amd64
             use_cross: false
           
-          # macOS ARM64
+          # macOS ARM64 (Apple Silicon)
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: code-runner
@@ -130,7 +172,7 @@ jobs:
         uses: actions/download-artifact@v3
         with:
           name: web-dist
-          path: server/static  # 根据你的项目调整路径
+          path: server/static
 
       - name: Install cross
         if: matrix.use_cross
@@ -180,7 +222,6 @@ jobs:
           
           for dir in code-runner-*/; do
             dirname="${dir%/}"
-            platform="${dirname#code-runner-}"
             
             # 创建打包目录
             mkdir -p "../release/${dirname}"
@@ -188,9 +229,21 @@ jobs:
             # 复制二进制文件
             cp "${dirname}"/* "../release/${dirname}/"
             
-            # 添加 README 等文件
+            # 添加文档文件
             cp ../README.md "../release/${dirname}/" 2>/dev/null || true
             cp ../LICENSE "../release/${dirname}/" 2>/dev/null || true
+            
+            # 创建启动说明
+            if [[ "$dirname" == *"windows"* ]]; then
+              echo "Double click code-runner.exe to start the server" > "../release/${dirname}/START.txt"
+              echo "Then open http://localhost:8080 in your browser" >> "../release/${dirname}/START.txt"
+            else
+              echo "#!/bin/bash" > "../release/${dirname}/start.sh"
+              echo "./code-runner" >> "../release/${dirname}/start.sh"
+              chmod +x "../release/${dirname}/start.sh"
+              echo "Run ./start.sh to start the server" > "../release/${dirname}/README.txt"
+              echo "Then open http://localhost:8080 in your browser" >> "../release/${dirname}/README.txt"
+            fi
             
             # 打包
             cd "../release"
@@ -203,14 +256,42 @@ jobs:
             cd ../artifacts
           done
 
+      - name: Generate checksums
+        working-directory: release
+        run: |
+          for file in *.{tar.gz,zip}; do
+            [ -f "$file" ] && sha256sum "$file" >> checksums.txt
+          done
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
             release/*.tar.gz
             release/*.zip
+            release/checksums.txt
           draft: false
           prerelease: false
           generate_release_notes: true
+          body: |
+            ## 📦 下载说明
+            
+            ### Windows
+            下载 `code-runner-windows-amd64.zip`，解压后运行 `code-runner.exe`
+            
+            ### macOS
+            - Intel: `code-runner-macos-amd64.tar.gz`
+            - Apple Silicon: `code-runner-macos-arm64.tar.gz`
+            
+            解压后运行 `./code-runner` 或 `./start.sh`
+            
+            ### Linux
+            - x86_64: `code-runner-linux-amd64.tar.gz`
+            - ARM64: `code-runner-linux-arm64.tar.gz`
+            - ARMv7: `code-runner-linux-armv7.tar.gz`
+            
+            解压后运行 `./code-runner` 或 `./start.sh`
+            
+            访问 http://localhost:8080 使用应用
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
