@@ -35,31 +35,38 @@ jobs:
         with:
           workspaces: server
       
+      # 从 Cargo.toml 获取包名
+      - name: Get package name
+        id: package
+        shell: bash
+        run: |
+          PACKAGE_NAME=$(grep '^name' server/Cargo.toml | head -n1 | cut -d'"' -f2)
+          echo "name=$PACKAGE_NAME" >> $GITHUB_OUTPUT
+          echo "Package name: $PACKAGE_NAME"
+      
       - name: Build
         working-directory: ./server
         run: cargo build --release --target ${{ matrix.target }}
       
-      # 直接打包
-      - name: Package (Windows)
-        if: matrix.os == 'windows-latest'
+      - name: Package
         shell: bash
         run: |
           cd server/target/${{ matrix.target }}/release
-          7z a ../../../../code-runner-${{ matrix.name }}.zip code-runner.exe
-      
-      - name: Package (Unix)
-        if: matrix.os != 'windows-latest'
-        run: |
-          cd server/target/${{ matrix.target }}/release
-          chmod +x code-runner
-          tar czf ../../../../code-runner-${{ matrix.name }}.tar.gz code-runner
+          PACKAGE_NAME="${{ steps.package.outputs.name }}"
+          
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            7z a "../../../../${PACKAGE_NAME}-${{ matrix.name }}.zip" "${PACKAGE_NAME}.exe"
+          else
+            chmod +x "$PACKAGE_NAME"
+            tar czf "../../../../${PACKAGE_NAME}-${{ matrix.name }}.tar.gz" "$PACKAGE_NAME"
+          fi
       
       - uses: actions/upload-artifact@v4
         with:
           name: package-${{ matrix.name }}
           path: |
-            code-runner-*.tar.gz
-            code-runner-*.zip
+            *.tar.gz
+            *.zip
 
   release:
     needs: build
