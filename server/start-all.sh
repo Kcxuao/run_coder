@@ -14,7 +14,7 @@ DOCKER_OPTS=(
   --detach
   --restart=unless-stopped
   --network=none
-  --read-only
+  # --read-only
   --pids-limit=128
   --cpus="0.5"
   --memory="256m"
